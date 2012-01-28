@@ -7,18 +7,47 @@ import play.core._
 
 import java.sql._
 import javax.sql._
+import com.mchange.v2.c3p0.ComboPooledDataSource
+import com.mchange.v2.c3p0.ConnectionCustomizer
 
-import com.jolbox.bonecp._
-import com.jolbox.bonecp.hooks._
 
 /**
  * The Play Database API manages several connection pools.
  *
  * @param datasources the managed data sources
  */
-case class DBApi(datasources: Map[String, (BoneCPDataSource, Configuration)]) {
+trait DBApi {
 
+  val datasources: List[Tuple2[DataSource, String]]
+  
   /**
+   * shut down pool for given datasource
+   * @param ds 
+   */
+  def shutdownPool(ds: DataSource)
+  /**
+   * Retrieves a JDBC connection, with auto-commit set to `true`.
+   *
+   * Don’t forget to release the connection at some point by calling close().
+   *
+   * @param name the data source name
+   * @return a JDBC connection
+   * @throws an error if the required data source is not registered
+   */
+  def getDataSource(name: String): DataSource 
+
+/**
+   * Retrieves the JDBC connection URL for a particular data source.
+   *
+   * @param name the data source name
+   * @return The JDBC URL connection string, i.e. `jdbc:…`
+   * @throws an error if the required data source is not registered
+   */
+  def getDataSourceURL(name: String): String = {
+    val ds = getDataSource(name)
+    ds.getConnection.getMetaData.getURL
+  }
+   /**
    * Retrieves a JDBC connection.
    *
    * Don’t forget to release the connection at some point by calling close().
@@ -33,35 +62,6 @@ case class DBApi(datasources: Map[String, (BoneCPDataSource, Configuration)]) {
     connection.setAutoCommit(autocommit)
     connection
   }
-
-  /**
-   * Retrieves a JDBC connection, with auto-commit set to `true`.
-   *
-   * Don’t forget to release the connection at some point by calling close().
-   *
-   * @param name the data source name
-   * @return a JDBC connection
-   * @throws an error if the required data source is not registered
-   */
-  def getDataSource(name: String): DataSource = {
-    datasources.get(name).map { _._1 }.getOrElse {
-      throw new Exception("No database [" + name + "] is registred")
-    }
-  }
-
-  /**
-   * Retrieves the JDBC connection URL for a particular data source.
-   *
-   * @param name the data source name
-   * @return The JDBC URL connection string, i.e. `jdbc:…`
-   * @throws an error if the required data source is not registered
-   */
-  def getDataSourceURL(name: String): String = {
-    datasources.get(name).flatMap { _._2.getString("url") }.getOrElse {
-      throw new Exception("No database [" + name + "] is registred")
-    }
-  }
-
   /**
    * Execute a block of code, providing a JDBC connection. The connection is
    * automatically released.
@@ -102,101 +102,7 @@ case class DBApi(datasources: Map[String, (BoneCPDataSource, Configuration)]) {
 
 }
 
-/**
- * Helper methods for creating data sources managed by `DBApi`.
- */
-object DBApi {
 
-  /**
-   * Creates a new data source from a configuration.
-   *
-   * @param conf the configuration part related to this data source
-   * @param classloader the classloader used to load the JDBC driver
-   */
-  def createDataSource(conf: Configuration, classloader: ClassLoader = ClassLoader.getSystemClassLoader) = {
-
-    val datasource = new BoneCPDataSource
-
-    // Try to load the driver
-    conf.getString("driver").map { driver =>
-      try {
-        DriverManager.registerDriver(new play.utils.ProxyDriver(Class.forName(driver, true, classloader).newInstance.asInstanceOf[Driver]))
-      } catch {
-        case e => throw conf.reportError("driver", "Driver not found: [" + driver + "]", Some(e))
-      }
-    }
-
-    val autocommit = conf.getBoolean("autocommit").getOrElse(true)
-    val isolation = conf.getString("isolation").getOrElse("READ_COMMITTED") match {
-      case "NONE" => Connection.TRANSACTION_NONE
-      case "READ_COMMITTED" => Connection.TRANSACTION_READ_COMMITTED
-      case "READ_UNCOMMITTED " => Connection.TRANSACTION_READ_UNCOMMITTED
-      case "REPEATABLE_READ " => Connection.TRANSACTION_REPEATABLE_READ
-      case "SERIALIZABLE" => Connection.TRANSACTION_SERIALIZABLE
-      case unknown => throw conf.reportError("isolation", "Unknown isolation level [" + unknown + "]")
-    }
-    val catalog = conf.getString("defaultCatalog")
-    val readOnly = conf.getBoolean("readOnly").getOrElse(false)
-
-    datasource.setClassLoader(classloader)
-
-    val logger = Logger("com.jolbox.bonecp")
-
-    // Re-apply per connection config @ checkout
-    datasource.setConnectionHook(new AbstractConnectionHook {
-
-      override def onCheckIn(connection: ConnectionHandle) {
-        if (logger.isTraceEnabled) {
-          logger.trace("Check in connection [%s leased]".format(datasource.getTotalLeased))
-        }
-      }
-
-      override def onCheckOut(connection: ConnectionHandle) {
-        connection.setAutoCommit(autocommit)
-        connection.setTransactionIsolation(isolation)
-        connection.setReadOnly(readOnly)
-        catalog.map(connection.setCatalog(_))
-        if (logger.isTraceEnabled) {
-          logger.trace("Check out connection [%s leased]".format(datasource.getTotalLeased))
-        }
-      }
-
-    })
-
-    // url is required
-    conf.getString("url").map(datasource.setJdbcUrl(_)).orElse {
-      throw conf.globalError("Missing url configuration for database [" + conf + "]")
-    }
-
-    conf.getString("user").map(datasource.setUsername(_))
-    conf.getString("pass").map(datasource.setPassword(_))
-    conf.getString("password").map(datasource.setPassword(_))
-
-    // Pool configuration
-    conf.getInt("partitionCount").map(datasource.setPartitionCount(_))
-    conf.getInt("maxConnectionsPerPartition").map(datasource.setMaxConnectionsPerPartition(_))
-    conf.getInt("minConnectionsPerPartition").map(datasource.setMinConnectionsPerPartition(_))
-    conf.getInt("acquireIncrement").map(datasource.setAcquireIncrement(_))
-    conf.getInt("acquireRetryAttempts").map(datasource.setAcquireRetryAttempts(_))
-    conf.getMilliseconds("acquireRetryDelay").map(datasource.setAcquireRetryDelayInMs(_))
-    conf.getMilliseconds("connectionTimeout").map(datasource.setConnectionTimeoutInMs(_))
-    conf.getMilliseconds("idleMaxAge").map(datasource.setIdleMaxAgeInSeconds(_))
-    conf.getString("initSQL").map(datasource.setInitSQL(_))
-    conf.getBoolean("logStatements").map(datasource.setLogStatementsEnabled(_))
-    conf.getMilliseconds("maxConnectionAge").map(datasource.setMaxConnectionAge(_, java.util.concurrent.TimeUnit.MILLISECONDS))
-    conf.getBoolean("disableJMX").orElse(Some(true)).map(datasource.setDisableJMX(_))
-    conf.getString("connectionTestStatement").map(datasource.setConnectionTestStatement(_))
-
-    // Bind in JNDI
-    conf.getString("jndiName").map { name =>
-      JNDI.initialContext.rebind(name, datasource)
-      Logger("play").info("datasource [" + conf.getString("url").get + "] bound to JNDI as " + name)
-    }
-
-    datasource -> conf
-  }
-
-}
 
 /**
  * Provides a high-level API for getting JDBC connections.
@@ -277,52 +183,178 @@ object DB {
 }
 
 /**
- * Play Plugin to manage data sources.
  *
- * @param app the application that is registering the plugin
+ * Default customizer for all C3P0 connections.
+ * autocommit and isolation are expected to be set globally
+ * since we have no way of knowing the database name 
+ *(this class is created via reflection by the pool).
+ *
+ * different isolation/autocommit behaviour can be provided for any database
+ * by defining a db.<dbname>.pool.customizer key in application.conf
  */
-class DBPlugin(app: Application) extends Plugin {
+class C3P0ConnectionCustomizer extends ConnectionCustomizer {
 
-  private lazy val db = {
-    DBApi(app.configuration.getConfig("db").map { dbConf =>
-      dbConf.subKeys.map { db =>
-        db -> DBApi.createDataSource(dbConf.getConfig(db).get, app.classloader)
-      }.toMap
-    }.getOrElse(Map.empty))
+  private val conf = play.api.Configuration.load()
+  
+  private val autocommit = conf.getBoolean("db.autocommit").getOrElse(true)
+
+  private val isolation = conf.getString("db.isolation").getOrElse("READ_COMMITTED") match {
+      case "NONE" => Connection.TRANSACTION_NONE
+      case "READ_COMMITTED" => Connection.TRANSACTION_READ_COMMITTED
+      case "READ_UNCOMMITTED " => Connection.TRANSACTION_READ_UNCOMMITTED
+      case "REPEATABLE_READ " => Connection.TRANSACTION_REPEATABLE_READ
+      case "SERIALIZABLE" => Connection.TRANSACTION_SERIALIZABLE
+      case unknown => throw conf.reportError("isolation", "Unknown isolation level [" + unknown + "]")
+  }
+  def onAcquire(c: Connection, parentDataSourceIdentityToken: String) {
+      c.setTransactionIsolation(isolation)
+      c.setAutoCommit(autocommit)
+  }   
+
+   def onDestroy(c: Connection, parentDataSourceIdentityToken: String) {}
+   def onCheckOut(c: Connection, parentDataSourceIdentityToken: String) {}
+   def onCheckIn(c: Connection, parentDataSourceIdentityToken: String) {}
+
+}
+
+/**
+ * C3P0 implementation of the DBApi
+ * @param c configuration for the given db
+ * @param dbName, a datasource will be created only for the given dbName
+ * @param classloader 
+ */
+class C3P0Api(c: Configuration, dbName: Option[String], classloader: ClassLoader = ClassLoader.getSystemClassLoader) extends DBApi {
+
+
+   /** The exception we are throwing. */
+  private def error(m: String="") = throw new Exception("invalid DB configuration "+m)
+
+
+  private def register(driver: String) {
+      try {
+        DriverManager.registerDriver(new play.utils.ProxyDriver(Class.forName(driver, true, classloader).newInstance.asInstanceOf[Driver]))
+      } catch {
+        case e => throw c.reportError("driver", "Driver not found: [" + driver + "]", Some(e))
+      }
+    }
+
+  private def createDataSource(dbName: String, url: String, driver:String, c: Configuration): DataSource = {
+    var ds = new ComboPooledDataSource()
+    ds.setDriverClass(driver)
+    ds.setJdbcUrl(url)
+    c.getString("pool.user").map(e => ds.setUser(e)).getOrElse(Unit)
+    c.getString("pool.password").map(e => ds.setPassword(e)).getOrElse(Unit)
+    ds.setAcquireRetryAttempts(c.getInt("pool.retry.attempt").getOrElse(10))
+    ds.setCheckoutTimeout(c.getMilliseconds("pool.timeout").map(_.toInt).getOrElse(5000))
+    ds.setBreakAfterAcquireFailure(false)
+    ds.setMaxPoolSize(c.getInt("pool.maxSize").getOrElse(30))
+    ds.setMinPoolSize(c.getInt("pool.minSize").getOrElse(1))
+    ds.setMaxIdleTimeExcessConnections(c.getInt("pool.maxIdleTimeExcessConnections").getOrElse(0))
+    ds.setIdleConnectionTestPeriod(10)
+    ds.setTestConnectionOnCheckin(true)
+    // Bind JNDI
+    c.getString("jndiName").map { name =>
+      JNDI.initialContext.rebind(name, ds)
+      Logger("play").info("datasource [" + url + "] bound to JNDI as " + name)
+    }   
+    // set customizer
+    ds.setConnectionCustomizerClassName(c.getString("pool.customizer").getOrElse(classOf[C3P0ConnectionCustomizer].getName))  
+    ds               
+  }
+   
+  private val dbNames = dbName.map(n=> Set(n)).getOrElse(c.subKeys.filter{
+    !(k == "isolation" || k == "autocommit")
+  })   
+  //register either a specific connection or all of them 
+  val datasources: List[Tuple2[DataSource, String]] = dbNames.map { dbName =>
+      val url = c.getString(dbName+".url").getOrElse(error("- could not determine url for "+dbName+".url")) 
+      val driver = c.getString(dbName+".driver").getOrElse(error("- could not determine driver for "+dbName+".driver"))    
+      val extraConfig = c.getConfig(dbName).getOrElse(error("- could not find extra configs")) 
+      register(driver)
+      createDataSource(dbName, url, driver, extraConfig) -> dbName
+    }.toList
+  
+  def shutdownPool(ds: DataSource) = {
+    if (ds.isInstanceOf[ComboPooledDataSource]) {
+      ds.asInstanceOf[ComboPooledDataSource].hardReset()
+    } else {
+      throw new Exception("could not recognize DataSource, therefore unable to shutdown this pool")
+    }
   }
 
   /**
+   * Retrieves a JDBC connection, with auto-commit set to `true`.
+   *
+   * Don’t forget to release the connection at some point by calling close().
+   *
+   * @param name the data source name
+   * @return a JDBC connection
+   * @throws an error if the required data source is not registered
+   */
+  def getDataSource(name: String): DataSource = {
+    datasources.filter(_._2 == name).headOption.map(e => e._1).getOrElse(error(" - could not find datasource for "+name))
+  }
+
+}
+
+/**
+ * Generic DBPlugin interface
+ */
+trait DBPlugin extends Plugin {
+  def api: DBApi
+}
+
+/**
+ * a DBPlugin implementation that provides a DBApi
+ *
+ * @param app the application that is registering the plugin
+ */
+class C3P0Plugin(app: Application) extends DBPlugin {
+
+    /** The exception we are throwing. */
+  private def error = throw new Exception("db keys are missing from application.conf")
+
+  //*configuration for db-s
+  private val dbConfig = app.configuration.getConfig("db")
+  
+  //should be accessed in onStart first
+  private lazy val dbApi: DBApi = new C3P0Api(dbConfig.getOrElse(error), None, app.classloader)
+  
+  /**
+   * plugin is disabled if either configuration is missing or the plugin is explicitly disabled
+   */
+  private lazy val isDisabled = {
+    app.configuration.getString("dbplugin").filter(_ == "disabled").isDefined || dbConfig.isDefined == false
+  }
+ /**
    * Is this plugin enabled.
    *
    * {{{
-   * dbplugin.disabled=true
+   * dbplugin=disabled
    * }}}
    */
-  override lazy val enabled = {
-    !app.configuration.getString("dbplugin").filter(_ == "disabled").isDefined
-  }
+  override def enabled = isDisabled == false
 
   /**
    * Retrieves the underlying `DBApi` managing the data sources.
    */
-  def api = db
+  def api: DBApi = dbApi
 
   /**
    * Reads the configuration and connects to every data source.
    */
   override def onStart() {
-    db.datasources.map {
-      case (name, (ds, config)) => {
-        try {
-          ds.getConnection.close()
-          app.mode match {
-            case Mode.Test =>
-            case mode => Logger("play").info("database [" + name + "] connected at " + ds.getJdbcUrl)
-          }
-        } catch {
-          case e => {
-            throw config.reportError("url", "Cannot connect to database at [" + ds.getJdbcUrl + "]", Some(e.getCause))
-          }
+    //try to connect to each, this should be the first access to dbApi
+    dbApi.datasources.map { ds =>
+      try {
+        ds._1.getConnection.close()
+        app.mode match {
+          case Mode.Test =>
+          case mode => Logger("play").info("database [" + ds._2 + "] connected at " + ds._1.getConnection.getMetaData.getURL )
+        }
+      } catch {
+        case e => {
+          throw dbConfig.getOrElse(error).reportError("url", "Cannot connect to database at [" + ds._1.getConnection.getMetaData.getURL  + "]", Some(e.getCause))
         }
       }
     }
@@ -332,19 +364,19 @@ class DBPlugin(app: Application) extends Plugin {
    * Closes all data sources.
    */
   override def onStop() {
-    db.datasources.values.foreach {
-      case (ds, _) => try {
-        val bone = new com.jolbox.bonecp.BoneCP(ds.getConfig)
-        bone.shutdown()
-        ds.close()
+    dbApi.datasources.foreach {
+      case (ds,_) => try {
+        dbApi.shutdownPool(ds)
       } catch { case _ => }
     }
-    //wait for the pool's threads to shut down
-    Thread.sleep(100)
-    val drivers = DriverManager.getDrivers()
-    while (drivers.hasMoreElements) {
-      val driver = drivers.nextElement
-      DriverManager.deregisterDriver(driver)
+    dbConfig.getOrElse(error).getString("driver").map { driver =>
+      //wait for the pool's threads to shut down
+      Thread.sleep(100)
+      val drivers = DriverManager.getDrivers()
+      while (drivers.hasMoreElements) {
+        val driver = drivers.nextElement
+        DriverManager.deregisterDriver(driver)
+      }
     }
   }
 

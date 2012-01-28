@@ -184,7 +184,7 @@ object PlayBuild extends Build {
             "org.hibernate.javax.persistence"   %    "hibernate-jpa-2.0-api"    %   "1.0.1.Final",
             "com.h2database"                    %    "h2"                       %   "1.3.158",
             "org.scala-tools"                   %%   "scala-stm"                %   "0.4",
-            "com.jolbox"                        %    "bonecp"                   %   "0.7.1.RELEASE",
+            "c3p0" % "c3p0" % "0.9.1.2",
             "org.yaml"                          %    "snakeyaml"                %   "1.9",
             "org.hibernate"                     %    "hibernate-validator"      %   "4.2.0.Final",
             "org.springframework"               %    "spring-context"           %   "3.0.7.RELEASE" notTransitive(),
